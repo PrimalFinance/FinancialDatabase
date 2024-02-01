@@ -9,12 +9,15 @@ import datetime as dt
 # Yahoo finance imports
 import yfinance as yf
 
+
 # Scrapers
 sys.path.append(os.path.abspath(os.path.join("..", "Scrapers")))
 import Scrapers.macro_scraper
+import Scrapers.equity_scraper
 
 # Pandas
 import pandas as pd
+from pandas.errors import EmptyDataError
 import random
 
 
@@ -24,13 +27,19 @@ commodity_data_folder = f"{cwd}\\Database\\CommoditiesData"
 equity_data_folder = f"{cwd}\\Database\\EquityData"
 macro_data_folder = f"{cwd}\\Database\\MacroData"
 
+# Hardcoded sub-folder paths
+earnings_folder = f"{equity_data_folder}\\Earnings"
+filings_folder = f"{equity_data_folder}\\Filings"
+stocks_folder = f"{equity_data_folder}\\Stocks"
+
 
 class DataManager:
     def __init__(self, log_data=True) -> None:
         self.log_data = log_data
         self.macro_scraper = Scrapers.macro_scraper.MacroScraper()
+        self.equity_scraper = Scrapers.equity_scraper.EquityScraper()
 
-    ##################################################################### Data Fetching #####################################################################
+    ##################################################################### Equity Price Fetching #####################################################################
     def fetch_externally(self, ticker: str, period="max", interval="1d"):
         df = yf.download(ticker, period=period, interval=interval)
         return df
@@ -54,6 +63,116 @@ class DataManager:
                 df = self.calc_macd(df)
                 df.to_csv(ticker_file)  # Save locally
         return df
+
+    def get_ticker_list(self, num_tickers: int = 500) -> list:
+        file_path = f"{equity_data_folder}\\constituents.csv"
+        df = pd.read_csv(file_path)
+        df_len = len(df)
+
+        # If number of tickers requested is greater than the number of entries in the dataframe, default to the max df size.
+        if num_tickers > df_len:
+            num_tickers = df_len
+        ticker_list = df["Symbol"].to_list()
+        ticker_list = ticker_list[:num_tickers]
+        return ticker_list
+
+    ##################################################################### Equity Earnings Fetching #####################################################################
+    def get_earnings(self, ticker: str, frequency: str = "q", expired: int = 90):
+        # Path to earnings csv file for the ticker specified.
+        earnings_file_path = (
+            stocks_folder + f"\\{ticker.upper()}\\{ticker}_earnings.csv"
+        )
+        # Logic to handle csv reading.
+        try:
+
+            earnings_csv_data = pd.read_csv(earnings_file_path)
+            # Get the most recent reporting date.
+            most_recent_reporting_date = earnings_csv_data["reportedDate"].iloc[0]
+            date_difference = self.equity_scraper.get_date_difference(
+                target_date=most_recent_reporting_date,
+                compare_date=str(dt.datetime.now().date()),
+            )
+
+            # If date_difference is greater, fetch new data and write the new rows to the csv file.
+            if date_difference > expired:
+                # Fetch new earnings data.
+                earnings = self.equity_scraper.get_earnings_estimates(
+                    frequency=frequency
+                )
+                # Merge the dataframe from the csv file, and the new dataframe from the earnings file.
+                merged_df = pd.concat([earnings_csv_data, earnings], ignore_index=True)
+                merged_df = merged_df.drop_duplicates()
+                merged_df.to_csv(earnings_file_path, header=True, index=False)
+                return merged_df
+        except FileNotFoundError as e:
+            print(f"[Error] {e}")
+            # If the file is not found, fetch data and write to csv file.
+            earnings = self.equity_scraper.get_earnings_estimates(
+                ticker=ticker, frequency=frequency
+            )
+            earnings.to_csv(earnings_file_path, header=True, index=False)
+            return earnings
+
+    ##################################################################### Filing Dates #####################################################################
+    def get_filing_dates(self, ticker: str):
+        """
+        ticker: Ticker of a company.
+
+        Takes a ticker as a string. Searches a csv file names "quarterly_filings"
+        """
+        try:
+            ticker = ticker.upper()
+            file_path = f"{filings_folder}\\quarterly_filings.csv"
+            csv_file = pd.read_csv(file_path)
+
+            # Check if the ticker is in the csv file.
+            ticker_found = csv_file[csv_file["ticker"] == ticker]
+
+            if ticker_found.empty:
+
+                # Get the quarterly filings for the income statement.
+                fiscal_dates = self.equity_scraper.get_fiscal_dates(ticker)
+                # Get the dates of the last 4 quarters for the company.
+                last_4_quarters = fiscal_dates[:4].to_list()[::-1]
+                # income_statement_cols = income_statement.columns.to_list()
+
+                # Get the fiscal year end for the company.
+                fiscal_end = self.equity_scraper.get_fiscal_year_end_date(ticker)
+                # Get the organized quarters.
+                organized_quarters = self.equity_scraper.organize_quarters(
+                    ticker, last_4_quarters, fiscal_end=fiscal_end
+                )
+                organized_quarters = [organized_quarters]
+                # Turn the dictionary into a list. The only element should be this dictionary.
+                # Update csv dataframe with new values.
+                csv_file = csv_file.from_records(organized_quarters)
+
+                csv_file.to_csv(file_path, mode="a", header=False, index=False)
+                ticker_found = csv_file[csv_file["ticker"] == ticker]
+
+        except EmptyDataError:
+            csv_file = pd.DataFrame()
+            # Get the quarterly filings for the income statement.
+            fiscal_dates = self.equity_scraper.get_fiscal_dates(ticker)
+            # Get the dates of the last 4 quarters for the company.
+            last_4_quarters = fiscal_dates[:4].to_list()[::-1]
+            # income_statement_cols = income_statement.columns.to_list()
+
+            # Get the fiscal year end for the company.
+            fiscal_end = self.equity_scraper.get_fiscal_year_end_date(ticker)
+            # Get the organized quarters.
+            organized_quarters = self.equity_scraper.organize_quarters(
+                ticker, last_4_quarters, fiscal_end=fiscal_end
+            )
+            organized_quarters = [organized_quarters]
+            # Turn the dictionary into a list. The only element should be this dictionary.
+            # Update csv dataframe with new values.
+            csv_file = csv_file.from_records(organized_quarters)
+
+            csv_file.to_csv(file_path, header=True, index=False)
+            ticker_found = csv_file[csv_file["ticker"] == ticker]
+
+        return ticker_found
 
     ##################################################################### TA Calculations #####################################################################
     def calc_rsi(self, df: pd.DataFrame, rsi_period: int = 14) -> pd.DataFrame:
